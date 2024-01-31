@@ -1,0 +1,17 @@
+[package]
+name = "biter"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.79"
+copypasta = "0.10.0"
+iroh = "0.12.0"
+iroh-bytes = "0.12.0"
+iroh-sync = "0.12.0"
+tokio = "1.35.1"
+tokio-util = "0.7.10"
+twox-hash = "1.6.3"
+x11rb = "0.13.0"
