@@ -1,7 +1,7 @@
 use copypasta::{ClipboardContext, ClipboardProvider};
 use twox_hash::xxh3;
 
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use std::time::Duration;
 /// document, and update the system clipboard accordingly.
 pub fn watch(clipboard: ClipboardContext, synced_clip: Arc<Mutex<u64>>) -> String {
     let wait_time = 1;
-    let mut data = cb.get_contents().unwrap();
+    let mut data = clipboard.get_contents().unwrap();
     let mut hash = xxh3::hash64(data.as_bytes());
     println!("the hash of the clipboard contents: {}", data);
 
@@ -25,7 +25,7 @@ pub fn watch(clipboard: ClipboardContext, synced_clip: Arc<Mutex<u64>>) -> Strin
         let sync_clip_hash = xxh3::hash64(sc.as_bytes());
 
         let old_hash = hash;
-        data = cb.get_contents().unwrap();
+        data = clipboard.get_contents().unwrap();
         hash = xxh3::hash64(data.as_bytes());
 
         // If the clipboard content is new, and not sent from a remote device, .
