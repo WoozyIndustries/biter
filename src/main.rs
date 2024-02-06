@@ -1,12 +1,14 @@
 mod system_clipboard;
 
 use anyhow;
+use colored::*;
 use copypasta::{ClipboardContext, ClipboardProvider};
 use inquire::Text;
 use iroh::client::LiveEvent;
 use iroh::node::Node;
 use iroh::rpc_protocol::ShareMode;
 use iroh_net::key::PublicKey;
+use log::{debug, error, info};
 use rand::{rngs::OsRng, Rng};
 use tokio;
 use tokio_stream::StreamExt;
@@ -17,18 +19,22 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use system_clipboard::MemClip;
+
 // Uses two threads:
 // 1. Main thread manages iroh node, and syncs clipboard contents with remote peers.
 // 2. Secondary thread polls clipboard for changes, and alerts the main thread.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let mut rng = OsRng;
     let mut clipboard = ClipboardContext::new().expect(
         "shiiiiiittttt the clipboard didn't work. what the hell goofy ass OS are you running?",
     );
     let memclip_pair = Arc::new((
-        Mutex::new(clipboard.get_contents().unwrap()),
+        Mutex::new(MemClip::new(clipboard.get_contents().unwrap())),
         Condvar::new(),
     )); // In memory var representing the clipboard contents (for syncing).
 
@@ -45,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
         .spawn()
         .await?;
     let client = node.client();
+    info!("started iroh node".green());
 
     let mut devices: HashMap<PublicKey, bool> = HashMap::new(); // To store pub keys of other iroh nodes
                                                                 // syncing our document. Stores them as
@@ -76,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .expect("could not create doc ticket :( booooooo");
 
-    println!("go check out the document dog: {}", doc_ticket);
+    info!("go check out the document dog: {}", doc_ticket.cyan());
     Text::new("Enter ⭕ to continue").prompt();
 
     // What does the main thread actually need to do yet?
@@ -85,17 +92,33 @@ async fn main() -> anyhow::Result<()> {
     //   clipboard.
     let stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
     let poll_frequency = Duration::from_secs(1); // Consider updating this.
+
+    debug!("starting iroh remote content event loop");
     loop {
         while let Some(event) = stream.next().await {
             match event {
                 LiveEvent::InsertRemote(e) => {
-                    /* InsertRemote {
-                        from: PublicKey,
-                        entry: Entry,
-                        content_status: ContentStatus,
-                    } */ // do something with this event, create a function above.
+                    // For now we support 69MB 🤙🥴🤙.
+                    if e.key == "memclip".as_bytes() && e.entry.content_len < 72351744 {
+                        match e.entry.content_bytes(doc) {
+                            Ok(bytes) => {
+                                let (memclip, cvar) = &*memclip_pair;
+                                let mut mc = memclip.lock().unwrap();
+                                *mc = String::from_utf(bytes);
+                                debug!(
+                                    "memclip set to remote content: {}",
+                                    e.entry.content_hash().to_hex()
+                                )
+                            }
+                            Err(err) => {
+                                error!("error occurred during document sync: {}", err.red())
+                            }
+                        }
+                    }
                 }
 
+                // TODO: Do something UI side to allow validating the public keys
+                // of devices, and giving them some kind of user friendly nickname.
                 LiveEvent::NeighborUp(pub_key) => devices.insert(pub_key, true),
                 LiveEvent::NeighborDown(pub_key) => {
                     devices
@@ -103,12 +126,24 @@ async fn main() -> anyhow::Result<()> {
                         .and_modify(|e| *e = false)
                         .or_insert(false); // Man, I miss Python dictionaries.
                 }
+
+                _ => {} // Default case.
             }
         }
-        thread::sleep(poll_frequency);
-    }
+        // Wait to see if our Condvar receives any notification from the other thread.
+        // This feels more efficient than just sleeping 🥴.
+        let (memclip, cvar) = &*memclip_pair;
+        let mut mc = memclip.lock().unwrap();
+        let old_hash = *mc.hash;
 
-    // 2. Watch for events in the Condvar, and then update the remote document accordingly.
+        let result = cvar
+            .wait_timeout(mc, poll_duration)
+            .expect("lock was poisoned 🐍 something got really 🅱ucked 🆙");
+        mc = result.0;
+
+        // If the memclip has been updated, sync it to our iroh peers.
+        if *mc.hash != old_hash {}
+    }
 
     Ok(())
 }
