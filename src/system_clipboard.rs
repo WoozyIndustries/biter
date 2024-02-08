@@ -7,8 +7,8 @@ use std::thread;
 use std::time::Duration;
 
 pub struct MemClip {
-    hash: u64,
-    data: String,
+    pub hash: u64,
+    pub data: String,
 }
 
 impl MemClip {
@@ -44,16 +44,16 @@ pub fn watch(
         clip_hash = xxh3::hash64(data.as_bytes());
 
         // If the clipboard content is new, and not sent from a remote device.
-        if clip_hash != old_hash && clip_hash != *mc.hash {
+        if clip_hash != old_hash && clip_hash != mc.hash {
             *mc = MemClip::new(data); // Update the synced clipboard with data from system clip.
             cvar.notify_one(); // Notify the main thread that memclip was changed.
             debug!("memclip synced with clipboard change: twox={}", clip_hash);
-        } else if clip_hash == old_hash && clip_hash != *mc.hash {
+        } else if clip_hash == old_hash && clip_hash != mc.hash {
             // If the clipboard isn't new, but the memclip has been changed:
-            clipboard.set_contents(*mc.data).unwrap();
+            clipboard.set_contents((*mc.data).to_string()).unwrap();
             debug!(
                 "system clipboard synced from remote change: twox={}",
-                *mc.hash
+                mc.hash
             );
         }
     }
