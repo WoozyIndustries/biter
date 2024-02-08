@@ -56,5 +56,7 @@ pub fn watch(
                 mc.hash
             );
         }
+
+        drop(mc); // drop our lock while we sleep.
     }
 }
