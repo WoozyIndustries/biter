@@ -308,7 +308,6 @@ dependencies = [
  "env_logger",
  "inquire",
  "iroh",
- "iroh-net",
  "log",
  "rand",
  "tokio",

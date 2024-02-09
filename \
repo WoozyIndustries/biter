@@ -32,7 +32,7 @@ use system_clipboard::MemClip;
 // Design
 // --------------------------------------------------------------------------------
 // Uses three threads:
-// 1. Main thread manages iroh node, and subscribes to events on an iroh doc:
+// 1. Main thread manages iroh node, and subscribes to events on the remote doc:
 //    * Keeps track of peers we are syncing with.
 //    * Updates our memclip (in-memory clipboard for syncing between threads) when
 //      peers write to it.
@@ -101,12 +101,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize and start the conditional variable thread.
     let _cv_thread = thread::spawn(move || {
-        sync::wait_on_memclip(
-            client.clone(),
-            author.clone(),
-            doc.id(),
-            Arc::clone(&memclip_pair),
-        )
+        sync::wait_on_memclip(author.clone(), doc.clone(), Arc::clone(&memclip_pair))
     });
 
     let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
