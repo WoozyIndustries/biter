@@ -1,7 +1,9 @@
 use colored::*;
 use iroh::client::Iroh;
+use iroh::rpc_protocol::ProviderService;
 use iroh::sync::{AuthorId, NamespaceId};
 use log::{debug, error};
+use quic_rpc::ServiceConnection;
 
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -9,7 +11,7 @@ use crate::system_clipboard::MemClip;
 
 /// Wait for our Condvar to be notified from the clipboard monitoring thread, and
 /// sync memclip to the remote iroh doc.
-pub async fn wait_on_memclip<C>(
+pub async fn wait_on_memclip<C: ServiceConnection<ProviderService>>(
     client: Iroh<C>,
     author: AuthorId,
     doc_id: NamespaceId,
@@ -17,10 +19,12 @@ pub async fn wait_on_memclip<C>(
 ) {
     debug!("conditional thread waiting for events...");
 
-    let doc = match client.docs.open(doc_id).expect(
-        "oh fuuuuuuuc, something went wrong trying to get a handle to doc {}",
-        doc_id.fmt_short().red(),
-    ) {
+    let doc = match client
+        .docs
+        .open(doc_id)
+        .await
+        .expect("oh fuuuuuuuc, something went wrong trying to get a handle to the doc")
+    {
         Some(d) => d,
         None => panic!(
             "hwhat in DU_Tnation, there ain't no document by the name of {}",
@@ -37,11 +41,12 @@ pub async fn wait_on_memclip<C>(
         mc = cvar
             .wait(mc)
             .expect("lock was poisoned 🐍 something got really 🅱ucked 🆙");
+        let new_hash = mc.hash;
 
         // If the memclip has been updated, sync it to our iroh peers.
         // It's important to check this condition each time due to potential spurious
         // wakeups. See https://doc.rust-lang.org/std/sync/struct.Condvar.html#method.wait.
-        if mc.hash != old_hash {
+        if new_hash != old_hash {
             debug!("memclip has been updated, syncing to iroh document...");
 
             let owned_copy = mc.data.to_owned();
@@ -55,7 +60,7 @@ pub async fn wait_on_memclip<C>(
                     "something went wrong trying to update the remote doc: {}",
                     err.to_string().red()
                 ),
-            }
+            };
         }
     }
 }

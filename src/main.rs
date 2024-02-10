@@ -32,13 +32,19 @@ use system_clipboard::MemClip;
 // Design
 // --------------------------------------------------------------------------------
 // Uses three threads:
+//
 // 1. Main thread manages iroh node, and subscribes to events on an iroh doc:
 //    * Keeps track of peers we are syncing with.
 //    * Updates our memclip (in-memory clipboard for syncing between threads) when
 //      peers write to it.
 //
-// 2. Clipboard thread (`cb_thread`) watches for changes to the system clipboard,
-//    updates our memclip, and
+// 2. Clipboard thread (`cb_thread`) watches for changes to the system clipboard
+//    and syncs them to our memclip. It then notifies the `cv_thread` via a `Condvar`.
+//
+// 3. The conditional thread (`cv_thread`) waits for notifications on a `Condvar`.
+//    When notified, the memclip is checked and the data is synced to the iroh doc
+//    if it is actually new.
+//    See https://doc.rust-lang.org/std/sync/struct.Condvar.html for more info.
 //
 
 #[tokio::main]
