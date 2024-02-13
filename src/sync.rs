@@ -9,6 +9,22 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::system_clipboard::MemClip;
 
+/// Dog, just be patient.
+/// Waits for a notification on the condvar, locks the memclip mutex, and returns
+/// a copy of the data inside, as well as the hash of the data prior to waiting on
+/// the Condvar (see its use in `wait_on_memclip`).
+fn chill(memclip: &Mutex<MemClip>, cvar: &Condvar) -> (MemClip, u64) {
+    let mut mc = memclip.lock().unwrap();
+    let old_hash = mc.hash;
+
+    // This function will release the lock until it's notified.
+    mc = cvar
+        .wait(mc)
+        .expect("lock was poisoned 🐍 something got really 🅱ucked 🆙");
+
+    (mc.clone(), old_hash)
+}
+
 /// Wait for our Condvar to be notified from the clipboard monitoring thread, and
 /// sync memclip to the remote iroh doc.
 pub async fn wait_on_memclip<C: ServiceConnection<ProviderService>>(
@@ -34,24 +50,15 @@ pub async fn wait_on_memclip<C: ServiceConnection<ProviderService>>(
 
     let (memclip, cvar) = &*memclip_pair;
     loop {
-        let mut mc = memclip.lock().unwrap();
-        let old_hash = mc.hash;
-
-        // This function will release the lock until it's notified.
-        mc = cvar
-            .wait(mc)
-            .expect("lock was poisoned 🐍 something got really 🅱ucked 🆙");
-        let new_hash = mc.hash;
+        let (mc, old_hash) = chill(memclip, cvar);
 
         // If the memclip has been updated, sync it to our iroh peers.
         // It's important to check this condition each time due to potential spurious
         // wakeups. See https://doc.rust-lang.org/std/sync/struct.Condvar.html#method.wait.
-        if new_hash != old_hash {
+        if mc.hash != old_hash {
             debug!("memclip has been updated, syncing to iroh document...");
 
-            let owned_copy = mc.data.to_owned();
-            drop(mc); // Drop our lock to unblock other threads.
-            match doc.set_bytes(author, "memclip", owned_copy).await {
+            match doc.set_bytes(author, "memclip", mc.data).await {
                 Ok(blob_id) => debug!(
                     "synced blob {} from the system clipboard",
                     blob_id.to_hex().cyan()

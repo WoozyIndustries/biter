@@ -61,8 +61,8 @@ async fn main() -> anyhow::Result<()> {
     )); // In memory var representing the clipboard contents (for syncing).
 
     // Start the clipboard thread.
-    let _cb_thread =
-        thread::spawn(move || system_clipboard::watch(clipboard, Arc::clone(&memclip_pair)));
+    let mc2 = Arc::clone(&memclip_pair);
+    let _cb_thread = thread::spawn(|| system_clipboard::watch(clipboard, mc2));
 
     // Create an iroh runtime with one worker thread, reusing the tokio runtime.
     // Set up Iroh with in-memory blob and document stores, and start the node.
@@ -106,13 +106,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Initialize and start the conditional variable thread.
-    let _cv_thread = thread::spawn(move || {
-        sync::wait_on_memclip(
-            client.clone(),
-            author.clone(),
-            doc.id(),
-            Arc::clone(&memclip_pair),
-        )
+    let mc3 = Arc::clone(&memclip_pair);
+    let doc_id = doc.id();
+    let _cv_thread = tokio::spawn(async move {
+        sync::wait_on_memclip(client.clone(), author.clone(), doc_id, mc3).await;
     });
 
     let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");

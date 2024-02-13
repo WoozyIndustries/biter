@@ -6,6 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[derive(Clone)]
 pub struct MemClip {
     pub hash: u64,
     pub data: String,
