@@ -1,3 +1,4 @@
+mod sync;
 mod system_clipboard;
 
 use anyhow;
@@ -5,25 +6,46 @@ use colored::*;
 use copypasta::{ClipboardContext, ClipboardProvider};
 use iroh::base::ticket::Ticket;
 use iroh::client::LiveEvent;
+use iroh::net::key::PublicKey;
 use iroh::node::Node;
 use iroh::rpc_protocol::ShareMode;
-use iroh_net::key::PublicKey;
 use log::{debug, error, info};
 use tokio;
 use tokio_stream::StreamExt;
 use tokio_util::task::LocalPoolHandle;
 
 use std::collections::HashMap;
-use std::env;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use system_clipboard::MemClip;
 
-// Uses two threads:
-// 1. Main thread manages iroh node, and syncs clipboard contents with remote peers.
-// 2. Secondary thread polls clipboard for changes, and alerts the main thread.
+// Glossary
+// --------------------------------------------------------------------------------
+// * iroh document: see https://iroh.computer/docs/layers/documents.
+//
+// * memclip: an in-memory `String` for keeping track of clipboard changes between
+//            our system and the remote clipboard (iroh document).
+//
+
+// Design
+// --------------------------------------------------------------------------------
+// Uses three threads:
+//
+// 1. Main thread manages iroh node, and subscribes to events on an iroh doc:
+//    * Keeps track of peers we are syncing with.
+//    * Updates our memclip (in-memory clipboard for syncing between threads) when
+//      peers write to it.
+//
+// 2. Clipboard thread (`cb_thread`) watches for changes to the system clipboard
+//    and syncs them to our memclip. It then notifies the `cv_thread` via a `Condvar`.
+//
+// 3. The conditional thread (`cv_thread`) waits for notifications on a `Condvar`.
+//    When notified, the memclip is checked and the data is synced to the iroh doc
+//    if it is actually new.
+//    See https://doc.rust-lang.org/std/sync/struct.Condvar.html for more info.
+//
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -38,8 +60,9 @@ async fn main() -> anyhow::Result<()> {
         Condvar::new(),
     )); // In memory var representing the clipboard contents (for syncing).
 
-    let mcp2 = Arc::clone(&memclip_pair);
-    let _cb_thread = thread::spawn(move || system_clipboard::watch(clipboard, mcp2));
+    // Start the clipboard thread.
+    let mc2 = Arc::clone(&memclip_pair);
+    let _cb_thread = thread::spawn(|| system_clipboard::watch(clipboard, mc2));
 
     // Create an iroh runtime with one worker thread, reusing the tokio runtime.
     // Set up Iroh with in-memory blob and document stores, and start the node.
@@ -72,12 +95,6 @@ async fn main() -> anyhow::Result<()> {
         .create()
         .await
         .expect("oh 🅱uck. couldn't create a document. HooOh.");
-
-    // moment of 🅱ruth. Can we actually write to this document?
-    // let blob_id = doc
-    //  .set_bytes(author, "memclip", "you look dusty.")
-    //    .await
-    //    .expect("⭕l' 🚌 couldn't set the bytes! you gotta help ⭕l' 🚌");
     let doc_ticket = doc
         .share(ShareMode::Write)
         .await
@@ -88,16 +105,18 @@ async fn main() -> anyhow::Result<()> {
         doc_ticket.serialize().cyan()
     );
 
-    // What does the main thread actually need to do yet?
-    // 1. Subscribe to updates from the remote document, and update the memclip accordingly.
-    //   * The other thread should then automatically detect those changes and update the
-    //   clipboard.
-    let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
-    let poll_frequency = Duration::from_secs(1); // Consider updating this.
+    // Initialize and start the conditional variable thread.
+    let mc3 = Arc::clone(&memclip_pair);
+    let doc_id = doc.id();
+    let _cv_thread = tokio::spawn(async move {
+        sync::wait_on_memclip(client.clone(), author.clone(), doc_id, mc3).await;
+    });
 
+    let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
     debug!("starting iroh remote content event loop");
+
     loop {
-        /*while let Some(event) = stream.next().await {
+        while let Some(event) = stream.next().await {
             debug!("event is here {:?}", event);
             match event {
                 Ok(e) => {
@@ -171,36 +190,6 @@ async fn main() -> anyhow::Result<()> {
                 Err(err) => error!(
                     "something went wrong with a {}: {}",
                     "LiveEvent".magenta(),
-                    err.to_string().red()
-                ),
-            }
-        } */
-
-        // let _cv_thread = thread::spawn(move || system_clipboard::watch(clipboard, mcp2));
-
-        // Wait to see if our Condvar receives any notification from the other thread.
-        // This feels more efficient than just sleeping 🥴.
-        debug!("main thread waiting on Condvar");
-        let (memclip, cvar) = &*memclip_pair;
-        let mut mc = memclip.lock().unwrap();
-        let old_hash = mc.hash;
-
-        let result = cvar
-            .wait_timeout(mc, poll_frequency)
-            .expect("lock was poisoned 🐍 something got really 🅱ucked 🆙");
-        mc = result.0;
-
-        // If the memclip has been updated, sync it to our iroh peers.
-        if mc.hash != old_hash {
-            debug!("memclip has been updated, syncing to iroh document...");
-            // drop(mc); // drop our lock to unblock other thread.
-            match doc.set_bytes(author, "memclip", mc.data.to_owned()).await {
-                Ok(blob_id) => debug!(
-                    "synced blob {} from the system clipboard",
-                    blob_id.to_hex().cyan()
-                ),
-                Err(err) => error!(
-                    "something went wrong trying to update the remote doc: {}",
                     err.to_string().red()
                 ),
             }
