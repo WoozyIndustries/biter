@@ -8,13 +8,16 @@ use iroh::base::ticket::Ticket;
 use iroh::client::LiveEvent;
 use iroh::net::key::PublicKey;
 use iroh::node::Node;
-use iroh::rpc_protocol::ShareMode;
+use iroh::rpc_protocol::{Hash, ShareMode};
+use iroh::ticket::DocTicket;
 use log::{debug, error, info};
+use structopt::StructOpt;
 use tokio;
 use tokio_stream::StreamExt;
 use tokio_util::task::LocalPoolHandle;
 
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -47,10 +50,47 @@ use system_clipboard::MemClip;
 //    See https://doc.rust-lang.org/std/sync/struct.Condvar.html for more info.
 //
 
+/// Command line options.
+#[derive(StructOpt, Debug)]
+#[structopt(name = "biter", about = "biter: copier, follower")]
+struct Opt {
+    #[structopt(subcommand)]
+    cmd: SubCommand,
+}
+
+/// CLI sub-commands.
+#[derive(StructOpt, Debug)]
+enum SubCommand {
+    #[structopt(
+        name = "start",
+        about = "start a new biter session" // TODO: implement a rejoin feature for a previous sesh.
+    )]
+    Start(StartOptions),
+
+    #[structopt(name = "join", about = "join an existing biter sesh")]
+    Join(JoinOptions),
+}
+
+/// CLI options for `SubCommand::Start`.
+#[derive(StructOpt, Debug)]
+struct StartOptions {
+    // Not yet implemented
+    #[structopt(short = "n", long, help = "force creation of a new biter session")]
+    new: bool,
+}
+
+/// CLI options for `SubCommand::Join`.
+#[derive(StructOpt, Debug)]
+struct JoinOptions {
+    #[structopt(help = "an iroh doc ticket for an existing session")]
+    ticket: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // RUST_LOG=biter=debug
     env_logger::init();
+    let args = Opt::from_args();
 
     let mut clipboard = ClipboardContext::new().expect(
         "shiiiiiittttt the clipboard didn't work. what the hell goofy ass OS are you running?",
@@ -76,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     let client = node.client();
     info!("{}", "started iroh node".green());
 
+    // Not really used yet.
     let mut devices: HashMap<PublicKey, bool> = HashMap::new(); // To store pub keys of other iroh nodes
                                                                 // syncing our document. Stores them as
                                                                 // bools to represent whether or not those
@@ -84,57 +125,102 @@ async fn main() -> anyhow::Result<()> {
                                                                 // verify the device keys through the UI
                                                                 // before adding them.
 
-    // Setup the iroh document.
+    // Initialize author info. TODO: persist this after shutdown.
     let author = client
         .authors
         .create()
         .await
         .expect("⭕ 🚌‼ couldn't create an author. HoOh.");
-    let doc = client
-        .docs
-        .create()
-        .await
-        .expect("oh 🅱uck. couldn't create a document. HooOh.");
-    let doc_ticket = doc
-        .share(ShareMode::Write)
-        .await
-        .expect("could not create doc ticket :( booooooo");
-
     info!(
-        "go check out the document dog: {}",
-        doc_ticket.serialize().cyan()
+        "your device key is: {}; use this to verify when syncing with other devices",
+        author.fmt_short().magenta()
     );
+
+    // Setup the iroh document.
+    // Note about doc tickets: doc tickets contain lists of peers to join. This
+    // makes me think that for persisting biter sessions we actually want to use
+    // NamespaceIds, and not the doc tickets. Yeah actually that makes a lot more
+    // sense. Oh shit, I think I actually want to create a new doc ticket every time
+    // a new peer joins 🤯 (since the ticket contains a list of nodes, see:
+    // https://docs.rs/iroh/latest/iroh/ticket/struct.DocTicket.html#).
+    let (doc, doc_ticket) = match args.cmd {
+        SubCommand::Start(opt) => {
+            let d = client
+                .docs
+                .create()
+                .await
+                .expect("oh 🅱uck. couldn't create a document. HooOh.");
+            let dt = d
+                .share(ShareMode::Write)
+                .await
+                .expect("could not create doc ticket :( booooooo");
+
+            info!(
+                "created new iroh document for clipboard sync; ticket: {}",
+                dt.serialize().cyan()
+            );
+            (d, dt)
+        }
+
+        // In the case of joining an existing session, we create a new doc ticket
+        // to have a ticket with an updated list of nodes.
+        SubCommand::Join(opt) => {
+            let dt = DocTicket::from_str(&opt.ticket).expect("invalid doc ticket 🦧💨");
+            let d = client
+                .docs
+                .import(dt)
+                .await
+                .expect("oh 🅱uck. couldn't join that biter sesh 🤙🥴🤙‼");
+            let new_dt = d
+                .share(ShareMode::Write)
+                .await
+                .expect("could not update doc ticket :( booooooo");
+
+            info!(
+                "joined iroh document {} for clipboard sync; updated doc ticket: {}",
+                d.id().fmt_short().cyan(),
+                new_dt.serialize().cyan()
+            );
+            (d, new_dt)
+        }
+    };
 
     // Initialize and start the conditional variable thread.
     let mc3 = Arc::clone(&memclip_pair);
+    let a2 = author.clone();
+    let c2 = client.clone();
     let doc_id = doc.id();
     let _cv_thread = tokio::spawn(async move {
-        sync::wait_on_memclip(client.clone(), author.clone(), doc_id, mc3).await;
+        sync::wait_on_memclip(c2, a2, doc_id, mc3).await;
     });
 
     let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
-    debug!("starting iroh remote content event loop");
 
-    loop {
-        while let Some(event) = stream.next().await {
-            debug!("event is here {:?}", event);
-            match event {
-                Ok(e) => {
-                    match e {
-                        LiveEvent::InsertRemote { from, entry, .. } => {
-                            // For now we support 69MB 🤙🥴🤙.
-                            if entry.key() == "memclip".as_bytes() && entry.content_len() < 72351744
-                            {
-                                debug!(
-                                    "new memclip entry from {} with content hash: {}",
-                                    from.fmt_short().cyan(),
-                                    entry.content_hash()
-                                );
-                                debug!(
-                                    "||||||| adding 2 second sleep temporarily to test ||||||||"
-                                );
-                                thread::sleep(Duration::from_secs(2));
-                                match entry.content_bytes(&doc).await {
+    debug!("starting iroh remote content event loop");
+    let mut watch_for_ready: Option<Hash> = None;
+    while let Some(event) = stream.next().await {
+        debug!("iroh event: {:?}", event);
+        match event {
+            Ok(e) => {
+                match e {
+                    LiveEvent::InsertRemote { from, entry, .. } => {
+                        // For now we support 69MB 🤙🥴🤙.
+                        if entry.key() == "memclip".as_bytes() && entry.content_len() < 72351744 {
+                            debug!(
+                                "new memclip entry from {} with content hash: {}",
+                                entry.author().fmt_short().cyan(),
+                                entry.content_hash().to_hex().cyan()
+                            );
+
+                            watch_for_ready = Some(entry.content_hash());
+                        }
+                    }
+
+                    // TODO: verify these events always happen in order.
+                    LiveEvent::ContentReady { hash } => {
+                        if let Some(h) = watch_for_ready {
+                            if hash == h {
+                                match client.blobs.read_to_bytes(hash).await {
                                     Ok(bytes) => {
                                         let (memclip, _cvar) = &*memclip_pair;
                                         let mut mc = memclip.lock().unwrap();
@@ -143,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
                                                 *mc = MemClip::new(s);
                                                 debug!(
                                                     "memclip set to remote content: {}",
-                                                    entry.content_hash().to_hex().cyan()
+                                                    hash.to_hex().cyan()
                                                 )
                                             }
                                             Err(err) => {
@@ -163,36 +249,36 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                         }
-
-                        // TODO: Do something UI side to allow validating the public keys
-                        // of devices, and giving them some kind of user friendly nickname.
-                        LiveEvent::NeighborUp(pub_key) => {
-                            devices.insert(pub_key, true);
-                            info!(
-                                "new peer device joined document with public key: {}",
-                                pub_key.fmt_short().cyan()
-                            );
-                        }
-                        LiveEvent::NeighborDown(pub_key) => {
-                            devices
-                                .entry(pub_key)
-                                .and_modify(|e| *e = false)
-                                .or_insert(false); // Man, I miss Python dictionaries.
-                            info!(
-                                "peer device left the document: {}",
-                                pub_key.fmt_short().cyan()
-                            );
-                        }
-
-                        _ => {} // Default case, we can ignore other events for now.
                     }
+
+                    // TODO: Do something UI side to allow validating the public keys
+                    // of devices, and giving them some kind of user friendly nickname.
+                    LiveEvent::NeighborUp(pub_key) => {
+                        devices.insert(pub_key, true);
+                        info!(
+                            "new peer device joined document with public key: {}",
+                            pub_key.fmt_short().cyan()
+                        );
+                    }
+                    LiveEvent::NeighborDown(pub_key) => {
+                        devices
+                            .entry(pub_key)
+                            .and_modify(|e| *e = false)
+                            .or_insert(false); // Man, I miss Python dictionaries.
+                        info!(
+                            "peer device left the document: {}",
+                            pub_key.fmt_short().cyan()
+                        );
+                    }
+
+                    _ => {} // Default case, we can ignore other events for now.
                 }
-                Err(err) => error!(
-                    "something went wrong with a {}: {}",
-                    "LiveEvent".magenta(),
-                    err.to_string().red()
-                ),
             }
+            Err(err) => error!(
+                "something went wrong with a {}: {}",
+                "LiveEvent".magenta(),
+                err.to_string().red()
+            ),
         }
     }
 
