@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create an iroh runtime with one worker thread, reusing the tokio runtime.
     // Set up Iroh with in-memory blob and document stores, and start the node.
+    info!("starting iroh node...");
     let lp = LocalPoolHandle::new(1);
     let blob_store = iroh::bytes::store::mem::Store::default();
     let doc_store = iroh::sync::store::memory::Store::default();
