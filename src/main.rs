@@ -1,5 +1,5 @@
-mod sync;
-mod system_clipboard;
+mod memclip;
+mod system_clip;
 
 use anyhow;
 use colored::*;
@@ -9,6 +9,7 @@ use iroh::client::LiveEvent;
 use iroh::net::key::PublicKey;
 use iroh::node::Node;
 use iroh::rpc_protocol::{Hash, ShareMode};
+use iroh::sync::ContentStatus;
 use iroh::ticket::DocTicket;
 use log::{debug, error, info};
 use structopt::StructOpt;
@@ -22,7 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use system_clipboard::MemClip;
+use memclip::MemClip;
 
 // Glossary
 // --------------------------------------------------------------------------------
@@ -192,7 +193,7 @@ async fn main() -> anyhow::Result<()> {
     let c2 = client.clone();
     let doc_id = doc.id();
     let _cv_thread = tokio::spawn(async move {
-        sync::wait_on_memclip(c2, a2, doc_id, mc3).await;
+        memclip::wait_for_updates(c2, a2, doc_id, mc3).await;
     });
 
     let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
@@ -204,7 +205,11 @@ async fn main() -> anyhow::Result<()> {
         match event {
             Ok(e) => {
                 match e {
-                    LiveEvent::InsertRemote { from, entry, .. } => {
+                    LiveEvent::InsertRemote {
+                        from,
+                        entry,
+                        content_status,
+                    } => {
                         // For now we support 69MB 🤙🥴🤙.
                         if entry.key() == "memclip".as_bytes() && entry.content_len() < 72351744 {
                             debug!(
@@ -213,7 +218,25 @@ async fn main() -> anyhow::Result<()> {
                                 entry.content_hash().to_hex().cyan()
                             );
 
-                            watch_for_ready = Some(entry.content_hash());
+                            match content_status {
+                                // If content isn't ready, store its hash so we know to look for
+                                // it's completion event. In the case of a clipboard we only need
+                                // the most recent addition.
+                                ContentStatus::Incomplete | ContentStatus::Missing => {
+                                    watch_for_ready = Some(entry.content_hash())
+                                }
+
+                                // If the content is ready, well, go ahead and download that 🅱oy 🤙🥴🤙‼
+                                ContentStatus::Complete => match entry.content_bytes(doc).await {
+                                    Ok(bytes) => {}
+                                    Err(err) => {
+                                        error!(
+                                            "error occurred during document sync: {}",
+                                            err.to_string().red()
+                                        )
+                                    }
+                                },
+                            };
                         }
                     }
 

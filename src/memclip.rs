@@ -4,10 +4,45 @@ use iroh::rpc_protocol::ProviderService;
 use iroh::sync::{AuthorId, NamespaceId};
 use log::{debug, error};
 use quic_rpc::ServiceConnection;
+use thiserror::Error;
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::system_clipboard::MemClip;
+#[derive(Error, Debug)]
+pub enum MemClipError {}
+
+#[derive(Clone)]
+pub struct MemClip {
+    pub hash: u64,
+    pub data: String,
+}
+
+impl MemClip {
+    pub fn new(data_string: String) -> MemClip {
+        MemClip {
+            hash: xxh3::hash64(data_string.as_bytes()),
+            data: data_string,
+        }
+    }
+}
+
+/// Set the value of the memclip from `Bytes` data.
+async fn set_bytes(bytes: Bytes, memclip_pair: &Arc<(Mutex<MemClip>, Condvar)>) -> Result<Error> {
+    let (memclip, _cvar) = *memclip_pair;
+    let mut mc = memclip.lock().unwrap();
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => {
+            *mc = MemClip::new(s);
+            debug!("memclip set to: {  }", bytes.on_purple())
+        }
+        Err(err) => {
+            error!(
+                "error occurred during document sync (string conversion): {}",
+                err.to_string().red()
+            )
+        }
+    }
+}
 
 /// Dog, just be patient.
 /// Waits for a notification on the condvar, locks the memclip mutex, and returns
@@ -27,7 +62,7 @@ fn chill(memclip: &Mutex<MemClip>, cvar: &Condvar) -> (MemClip, u64) {
 
 /// Wait for our Condvar to be notified from the clipboard monitoring thread, and
 /// sync memclip to the remote iroh doc.
-pub async fn wait_on_memclip<C: ServiceConnection<ProviderService>>(
+pub async fn wait_for_updates<C: ServiceConnection<ProviderService>>(
     client: Iroh<C>,
     author: AuthorId,
     doc_id: NamespaceId,
