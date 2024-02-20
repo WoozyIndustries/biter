@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.79"
+bytes = "1.5.0"
 colored = "2.1.0"
 copypasta = "0.10.0"
 env_logger = "0.11.1"

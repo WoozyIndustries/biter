@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use colored::*;
 use iroh::client::Iroh;
 use iroh::rpc_protocol::ProviderService;
@@ -5,11 +6,19 @@ use iroh::sync::{AuthorId, NamespaceId};
 use log::{debug, error};
 use quic_rpc::ServiceConnection;
 use thiserror::Error;
+use twox_hash::xxh3;
 
+use std::string::FromUtf8Error;
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Error, Debug)]
-pub enum MemClipError {}
+pub enum SetError {
+    #[error("the lock was poisoned 🔓🐍")]
+    PoisonLock,
+
+    #[error("error during data string conversion")]
+    StringConversion(#[from] FromUtf8Error),
+}
 
 #[derive(Clone)]
 pub struct MemClip {
@@ -27,20 +36,26 @@ impl MemClip {
 }
 
 /// Set the value of the memclip from `Bytes` data.
-async fn set_bytes(bytes: Bytes, memclip_pair: &Arc<(Mutex<MemClip>, Condvar)>) -> Result<Error> {
-    let (memclip, _cvar) = *memclip_pair;
-    let mut mc = memclip.lock().unwrap();
-    match String::from_utf8(bytes.to_vec()) {
-        Ok(s) => {
-            *mc = MemClip::new(s);
-            debug!("memclip set to: {  }", bytes.on_purple())
-        }
-        Err(err) => {
-            error!(
-                "error occurred during document sync (string conversion): {}",
-                err.to_string().red()
-            )
-        }
+pub async fn set_bytes(
+    bytes: Bytes,
+    memclip_pair: Arc<(Mutex<MemClip>, Condvar)>,
+) -> Result<(), SetError> {
+    let (memclip, _cvar) = &*memclip_pair;
+    match memclip.lock() {
+        Ok(mut mc) => match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => {
+                *mc = MemClip::new(s);
+                debug!(
+                    "memclip set to: [ {} ]",
+                    String::from_utf8(bytes.to_vec())
+                        .unwrap_or(String::from("<BINARY>"))
+                        .on_purple()
+                );
+                Ok(())
+            }
+            Err(err) => Err(SetError::StringConversion(err)),
+        },
+        Err(_err) => Err(SetError::PoisonLock),
     }
 }
 

@@ -18,10 +18,10 @@ use tokio_stream::StreamExt;
 use tokio_util::task::LocalPoolHandle;
 
 use std::collections::HashMap;
+use std::env;
 use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use memclip::MemClip;
 
@@ -89,7 +89,10 @@ struct JoinOptions {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // RUST_LOG=biter=debug
+    // Set up default logging config (override with `export RUST_LOG=_`).
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "biter=debug");
+    }
     env_logger::init();
     let args = Opt::from_args();
 
@@ -103,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the clipboard thread.
     let mc2 = Arc::clone(&memclip_pair);
-    let _cb_thread = thread::spawn(|| system_clipboard::watch(clipboard, mc2));
+    let _cb_thread = thread::spawn(|| system_clip::watch(clipboard, mc2));
 
     // Create an iroh runtime with one worker thread, reusing the tokio runtime.
     // Set up Iroh with in-memory blob and document stores, and start the node.
@@ -206,9 +209,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(e) => {
                 match e {
                     LiveEvent::InsertRemote {
-                        from,
                         entry,
                         content_status,
+                        ..
                     } => {
                         // For now we support 69MB 🤙🥴🤙.
                         if entry.key() == "memclip".as_bytes() && entry.content_len() < 72351744 {
@@ -227,15 +230,23 @@ async fn main() -> anyhow::Result<()> {
                                 }
 
                                 // If the content is ready, well, go ahead and download that 🅱oy 🤙🥴🤙‼
-                                ContentStatus::Complete => match entry.content_bytes(doc).await {
-                                    Ok(bytes) => {}
-                                    Err(err) => {
-                                        error!(
-                                            "error occurred during document sync: {}",
-                                            err.to_string().red()
-                                        )
+                                ContentStatus::Complete => {
+                                    match entry.content_bytes(&doc).await {
+                                        Ok(bytes) => {
+                                            match memclip::set_bytes(bytes, Arc::clone(&memclip_pair)).await {
+                                            Ok(_) => info!("memclip set by peer: {}", entry.author().fmt_short().magenta()),
+                                            Err(err) => error!("error occurred setting memclip to entry {}: {}", entry.content_hash().to_hex().cyan(), err.to_string().red()),
+                                        }
+                                        }
+                                        Err(err) => {
+                                            error!(
+                                                "error receiving bytes for entry {}: {}",
+                                                entry.content_hash().to_hex().cyan(),
+                                                err.to_string().red()
+                                            )
+                                        }
                                     }
-                                },
+                                }
                             };
                         }
                     }
@@ -246,27 +257,24 @@ async fn main() -> anyhow::Result<()> {
                             if hash == h {
                                 match client.blobs.read_to_bytes(hash).await {
                                     Ok(bytes) => {
-                                        let (memclip, _cvar) = &*memclip_pair;
-                                        let mut mc = memclip.lock().unwrap();
-                                        match String::from_utf8(bytes.to_vec()) {
-                                            Ok(s) => {
-                                                *mc = MemClip::new(s);
-                                                debug!(
-                                                    "memclip set to remote content: {}",
-                                                    hash.to_hex().cyan()
-                                                )
-                                            }
-                                            Err(err) => {
-                                                error!(
-                                                    "error occurred during document sync (string conversion): {}",
-                                                    err.to_string().red()
-                                                )
-                                            }
+                                        match memclip::set_bytes(bytes, Arc::clone(&memclip_pair))
+                                            .await
+                                        {
+                                            Ok(_) => info!(
+                                                "memclip set to blob: {}",
+                                                hash.to_hex().cyan()
+                                            ),
+                                            Err(err) => error!(
+                                                "error occurred setting memclip to entry {}: {}",
+                                                hash.to_hex().cyan(),
+                                                err.to_string().red()
+                                            ),
                                         }
                                     }
                                     Err(err) => {
                                         error!(
-                                            "error occurred during document sync: {}",
+                                            "error occurred retreiving bytes for blob {}: {}",
+                                            hash.to_hex().cyan(),
                                             err.to_string().red()
                                         )
                                     }
