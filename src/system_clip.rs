@@ -6,20 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
-#[derive(Clone)]
-pub struct MemClip {
-    pub hash: u64,
-    pub data: String,
-}
-
-impl MemClip {
-    pub fn new(data_string: String) -> MemClip {
-        MemClip {
-            hash: xxh3::hash64(data_string.as_bytes()),
-            data: data_string,
-        }
-    }
-}
+use crate::memclip::MemClip;
 
 /// Loops indefinitely, checking the system clipboard for changes.
 /// This sucks. Swap this out for something that's not polling (unfortunately that

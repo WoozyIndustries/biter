@@ -1,13 +1,63 @@
+use bytes::Bytes;
 use colored::*;
 use iroh::client::Iroh;
 use iroh::rpc_protocol::ProviderService;
 use iroh::sync::{AuthorId, NamespaceId};
 use log::{debug, error};
 use quic_rpc::ServiceConnection;
+use thiserror::Error;
+use twox_hash::xxh3;
 
+use std::string::FromUtf8Error;
 use std::sync::{Arc, Condvar, Mutex};
 
-use crate::system_clipboard::MemClip;
+#[derive(Error, Debug)]
+pub enum SetError {
+    #[error("the lock was poisoned 🔓🐍")]
+    PoisonLock,
+
+    #[error("error during data string conversion")]
+    StringConversion(#[from] FromUtf8Error),
+}
+
+#[derive(Clone)]
+pub struct MemClip {
+    pub hash: u64,
+    pub data: String,
+}
+
+impl MemClip {
+    pub fn new(data_string: String) -> MemClip {
+        MemClip {
+            hash: xxh3::hash64(data_string.as_bytes()),
+            data: data_string,
+        }
+    }
+}
+
+/// Set the value of the memclip from `Bytes` data.
+pub async fn set_bytes(
+    bytes: Bytes,
+    memclip_pair: Arc<(Mutex<MemClip>, Condvar)>,
+) -> Result<(), SetError> {
+    let (memclip, _cvar) = &*memclip_pair;
+    match memclip.lock() {
+        Ok(mut mc) => match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => {
+                *mc = MemClip::new(s);
+                debug!(
+                    "memclip set to: [ {} ]",
+                    String::from_utf8(bytes.to_vec())
+                        .unwrap_or(String::from("<BINARY>"))
+                        .on_purple()
+                );
+                Ok(())
+            }
+            Err(err) => Err(SetError::StringConversion(err)),
+        },
+        Err(_err) => Err(SetError::PoisonLock),
+    }
+}
 
 /// Dog, just be patient.
 /// Waits for a notification on the condvar, locks the memclip mutex, and returns
@@ -27,7 +77,7 @@ fn chill(memclip: &Mutex<MemClip>, cvar: &Condvar) -> (MemClip, u64) {
 
 /// Wait for our Condvar to be notified from the clipboard monitoring thread, and
 /// sync memclip to the remote iroh doc.
-pub async fn wait_on_memclip<C: ServiceConnection<ProviderService>>(
+pub async fn wait_for_updates<C: ServiceConnection<ProviderService>>(
     client: Iroh<C>,
     author: AuthorId,
     doc_id: NamespaceId,

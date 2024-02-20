@@ -1,5 +1,5 @@
-mod sync;
-mod system_clipboard;
+mod memclip;
+mod system_clip;
 
 use anyhow;
 use colored::*;
@@ -9,6 +9,7 @@ use iroh::client::LiveEvent;
 use iroh::net::key::PublicKey;
 use iroh::node::Node;
 use iroh::rpc_protocol::{Hash, ShareMode};
+use iroh::sync::ContentStatus;
 use iroh::ticket::DocTicket;
 use log::{debug, error, info};
 use structopt::StructOpt;
@@ -17,12 +18,12 @@ use tokio_stream::StreamExt;
 use tokio_util::task::LocalPoolHandle;
 
 use std::collections::HashMap;
+use std::env;
 use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Duration;
 
-use system_clipboard::MemClip;
+use memclip::MemClip;
 
 // Glossary
 // --------------------------------------------------------------------------------
@@ -88,7 +89,10 @@ struct JoinOptions {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // RUST_LOG=biter=debug
+    // Set up default logging config (override with `export RUST_LOG=_`).
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "biter=debug");
+    }
     env_logger::init();
     let args = Opt::from_args();
 
@@ -102,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Start the clipboard thread.
     let mc2 = Arc::clone(&memclip_pair);
-    let _cb_thread = thread::spawn(|| system_clipboard::watch(clipboard, mc2));
+    let _cb_thread = thread::spawn(|| system_clip::watch(clipboard, mc2));
 
     // Create an iroh runtime with one worker thread, reusing the tokio runtime.
     // Set up Iroh with in-memory blob and document stores, and start the node.
@@ -192,7 +196,7 @@ async fn main() -> anyhow::Result<()> {
     let c2 = client.clone();
     let doc_id = doc.id();
     let _cv_thread = tokio::spawn(async move {
-        sync::wait_on_memclip(c2, a2, doc_id, mc3).await;
+        memclip::wait_for_updates(c2, a2, doc_id, mc3).await;
     });
 
     let mut stream = doc.subscribe().await.expect("well I'll 🦧💨. couldn't subrscibe to the document, I guess something done got all 🚌ed 🆙");
@@ -204,7 +208,11 @@ async fn main() -> anyhow::Result<()> {
         match event {
             Ok(e) => {
                 match e {
-                    LiveEvent::InsertRemote { from, entry, .. } => {
+                    LiveEvent::InsertRemote {
+                        entry,
+                        content_status,
+                        ..
+                    } => {
                         // For now we support 69MB 🤙🥴🤙.
                         if entry.key() == "memclip".as_bytes() && entry.content_len() < 72351744 {
                             debug!(
@@ -213,7 +221,33 @@ async fn main() -> anyhow::Result<()> {
                                 entry.content_hash().to_hex().cyan()
                             );
 
-                            watch_for_ready = Some(entry.content_hash());
+                            match content_status {
+                                // If content isn't ready, store its hash so we know to look for
+                                // it's completion event. In the case of a clipboard we only need
+                                // the most recent addition.
+                                ContentStatus::Incomplete | ContentStatus::Missing => {
+                                    watch_for_ready = Some(entry.content_hash())
+                                }
+
+                                // If the content is ready, well, go ahead and download that 🅱oy 🤙🥴🤙‼
+                                ContentStatus::Complete => {
+                                    match entry.content_bytes(&doc).await {
+                                        Ok(bytes) => {
+                                            match memclip::set_bytes(bytes, Arc::clone(&memclip_pair)).await {
+                                            Ok(_) => info!("memclip set by peer: {}", entry.author().fmt_short().magenta()),
+                                            Err(err) => error!("error occurred setting memclip to entry {}: {}", entry.content_hash().to_hex().cyan(), err.to_string().red()),
+                                        }
+                                        }
+                                        Err(err) => {
+                                            error!(
+                                                "error receiving bytes for entry {}: {}",
+                                                entry.content_hash().to_hex().cyan(),
+                                                err.to_string().red()
+                                            )
+                                        }
+                                    }
+                                }
+                            };
                         }
                     }
 
@@ -223,27 +257,24 @@ async fn main() -> anyhow::Result<()> {
                             if hash == h {
                                 match client.blobs.read_to_bytes(hash).await {
                                     Ok(bytes) => {
-                                        let (memclip, _cvar) = &*memclip_pair;
-                                        let mut mc = memclip.lock().unwrap();
-                                        match String::from_utf8(bytes.to_vec()) {
-                                            Ok(s) => {
-                                                *mc = MemClip::new(s);
-                                                debug!(
-                                                    "memclip set to remote content: {}",
-                                                    hash.to_hex().cyan()
-                                                )
-                                            }
-                                            Err(err) => {
-                                                error!(
-                                                    "error occurred during document sync (string conversion): {}",
-                                                    err.to_string().red()
-                                                )
-                                            }
+                                        match memclip::set_bytes(bytes, Arc::clone(&memclip_pair))
+                                            .await
+                                        {
+                                            Ok(_) => info!(
+                                                "memclip set to blob: {}",
+                                                hash.to_hex().cyan()
+                                            ),
+                                            Err(err) => error!(
+                                                "error occurred setting memclip to entry {}: {}",
+                                                hash.to_hex().cyan(),
+                                                err.to_string().red()
+                                            ),
                                         }
                                     }
                                     Err(err) => {
                                         error!(
-                                            "error occurred during document sync: {}",
+                                            "error occurred retreiving bytes for blob {}: {}",
+                                            hash.to_hex().cyan(),
                                             err.to_string().red()
                                         )
                                     }
