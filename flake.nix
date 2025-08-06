@@ -17,5 +17,9 @@
     devShells.x86_64-linux.default = pkgs.mkShell {
       buildInputs = with pkgs; [ clang ];
     };
+
+    devShells.aarch64-darwin.default = macpkgs.mkShell {
+      buildInputs = with macpkgs; [ clang ];
+    };
   };
 }
