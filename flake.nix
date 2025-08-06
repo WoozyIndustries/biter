@@ -3,6 +3,9 @@
 
   # I have chosen not to manage Rust toolchain/dependencies via Nix, because I am quite
   # fond of rustup, and the entire Rust toolchain. This flake will be for external deps.
+  
+  # TODO: find a way to elimenate the duplicate package list declarations for different
+  # platforms (but please find a way that isn't super 🚌ed 🆙 like what you saw online).
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
@@ -19,7 +22,7 @@
     };
 
     devShells.aarch64-darwin.default = macpkgs.mkShell {
-      buildInputs = with macpkgs; [ clang ];
+      buildInputs = with macpkgs; [ clang pkg-config ];
     };
   };
 }
